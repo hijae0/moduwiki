@@ -1,7 +1,5 @@
 # Init
 import os
-import sys
-import psutil
 import signal
 import atexit
 import logging
@@ -9,7 +7,9 @@ import logging
 from route.tool.func import *
 from route import *
 
-from waitress import serve
+from hypercorn.asyncio import serve
+from hypercorn.config import Config
+
 from werkzeug.middleware.proxy_fix import ProxyFix
 
 args = sys.argv
@@ -37,35 +37,24 @@ with get_db_connect(init_mode = True) as conn:
     except:
         setup_tool = 'init'
 
-    old_ver = ""
-
     if setup_tool != 'init':
         ver_set_data = curs.fetchall()
         if ver_set_data:
-            old_ver = ver_set_data[0][0]
-            if int(version_list['c_ver']) > int(old_ver):
+            if int(version_list['c_ver']) > int(ver_set_data[0][0]):
                 setup_tool = 'update'
             else:
                 setup_tool = 'normal'
         else:
             setup_tool = 'init'
 
-    print("Run Mode : " + run_mode)
-    print("Setup Tool : " + setup_tool)
-    print("Old Version : " + old_ver)
-
     if run_mode != 'dev':
         file_name = linux_exe_chmod()
-        local_file_path = os.path.join("bin", file_name)
+        local_file_path = os.path.join("route_go", "bin", file_name)
 
         if not (setup_tool == "normal" and os.path.exists(local_file_path)):
             if os.path.exists(local_file_path):
-    print('Remove Old Binary')
-    try:
-        os.remove(local_file_path)
-    except PermissionError:
-        print('Permission denied while removing old binary; skipping removal')
-
+                print('Remove Old Binary')
+                os.remove(local_file_path)
 
             download_url = version_list["bin_link"] + file_name
 
@@ -187,19 +176,22 @@ with get_db_connect(init_mode = True) as conn:
             super(RegexConverter, self).__init__(url_map)
             self.regex = items[0]
 
-    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-    app = flask.Flask(__name__, template_folder = os.path.join(BASE_DIR, "views"))
+    app = flask.Flask(__name__, template_folder = './')
 
     app.config['JSON_AS_ASCII'] = False
     app.config['JSONIFY_PRETTYPRINT_REGULAR'] = False
-    app.config['SEND_FILE_MAX_AGE_DEFAULT'] = 4233600
+    app.config['SEND_FILE_MAX_AGE_DEFAULT'] = 3600
     if run_mode == 'dev':
         app.config['TEMPLATES_AUTO_RELOAD'] = True
         app.config['DEBUG'] = True
         app.config['ENV'] = 'development'
 
-    log = logging.getLogger('waitress')
+    log = logging.getLogger('hypercorn')
     log.setLevel(logging.ERROR)
+
+    app.jinja_env.filters['md5_replace'] = md5_replace
+    app.jinja_env.filters['load_lang'] = load_lang
+    app.jinja_env.filters['cut_100'] = cut_100
 
     app.url_map.converters['everything'] = EverythingConverter
     app.url_map.converters['regex'] = RegexConverter
@@ -221,36 +213,47 @@ with get_db_connect(init_mode = True) as conn:
     }
     for i in server_set_var:
         curs.execute(db_change('select data from other where name = ?'), [i])
-        server_set_val = curs.fetchall()
-        if server_set_val:
-            server_set_val = server_set_val[0][0]
-        elif server_set_env[i] != None:
-            server_set_val = server_set_env[i]
-
-            curs.execute(db_change('insert into other (name, data, coverage) values (?, ?, "")'), [i, server_set_env[i]])
+        row = curs.fetchone()
+        if row:
+            server_set_val = row[0]
         else:
-            if 'list' in server_set_var[i]:
-                print(server_set_var[i]['display'] + ' (' + server_set_var[i]['default'] + ') [' + ', '.join(server_set_var[i]['list']) + ']' + ' : ', end = '')
-            else:
-                print(server_set_var[i]['display'] + ' (' + server_set_var[i]['default'] + ') : ', end = '')
-
-            server_set_val = input()
-            if server_set_val == '':
-                server_set_val = server_set_var[i]['default']
-            elif server_set_var[i]['require'] == 'select':
-                if not server_set_val in server_set_var[i]['list']:
-                    server_set_val = server_set_var[i]['default']
-
+            # fallback to environment variable or sensible default
+            defaults = {
+                'host': os.getenv('NAMU_HOST', '0.0.0.0'),
+                'golang_port': os.getenv('NAMU_GOLANGPORT', '3001'),
+                'port': os.getenv('NAMU_PORT', '3000'),
+                'language': os.getenv('NAMU_LANG', 'en-US'),
+                'markup': os.getenv('NAMU_MARKUP', 'namumark'),
+                'encode': os.getenv('NAMU_ENCRYPT', 'sha3')
+            }
+            server_set_val = defaults[i]
+            # store the default into DB for consistency
             curs.execute(db_change('insert into other (name, data, coverage) values (?, ?, "")'), [i, server_set_val])
-
-        print(server_set_var[i]['display'] + ' : ' + server_set_val)
-
         server_set[i] = server_set_val
+
+# legacy input handling removed
         
 for for_a in server_set:
     global_some_set_do('setup_' + for_a, server_set[for_a])
 
 ###
+
+if platform.system() == 'Linux':
+    if platform.machine() in ["AMD64", "x86_64"]:
+        cmd = [os.path.join(".", "route_go", "bin", "main.amd64.bin")]
+    else:
+        cmd = [os.path.join(".", "route_go", "bin", "main.arm64.bin")]
+elif platform.system() == 'Darwin':
+    cmd = [os.path.join(".", "route_go", "bin", "main.mac.arm64.bin")]
+else:
+    if platform.machine() in ["AMD64", "x86_64"]:
+        cmd = [os.path.join(".", "route_go", "bin", "main.amd64.exe")]
+    else:
+        cmd = [os.path.join(".", "route_go", "bin", "main.arm64.exe")]
+        
+cmd += [server_set["golang_port"]]
+if run_mode != '':
+    cmd += [run_mode]
 
 async def golang_process_check():
     while True:
@@ -263,11 +266,11 @@ async def golang_process_check():
                 "url" : "test",
                 "data" : json_dumps(other_set_temp),
                 "session" : "{}",
-                "cookies" : "",
+                "cookie" : "",
                 "ip" : "127.0.0.1"
             }
 
-            response = requests.post('http://127.0.0.1:' + server_set["golang_port"] + '/compatible_api/test', data = json_dumps(other_set))
+            response = requests.post('http://localhost:' + server_set["golang_port"] + '/', data = json_dumps(other_set))
             if response.status_code == 200:
                 print('Golang turn on')
                 break
@@ -275,49 +278,7 @@ async def golang_process_check():
             print('Wait golang...')
             time.sleep(1)
 
-def kill_port(port, timeout = 1.5, force = True):
-    pids = {
-        c.pid for c in psutil.net_connections(kind = "inet")
-        if c.pid and c.laddr and c.laddr.port == port and c.status == psutil.CONN_LISTEN
-    }
-    procs = []
-    for pid in pids:
-        try:
-            p = psutil.Process(pid)
-            p.terminate()
-            procs.append(p)
-        except psutil.NoSuchProcess:
-            pass
-        except psutil.AccessDenied:
-            print("Golang PID is not dying, please shut down manually by sudo.")
-            raise
-
-    _, alive = psutil.wait_procs(procs, timeout = timeout)
-    if force:
-        for p in alive:
-            try:
-                p.kill()
-            except psutil.NoSuchProcess:
-                pass
-            except psutil.AccessDenied:
-                print("Golang PID is not dying, please shut down manually by sudo.")
-                raise
-
-        psutil.wait_procs(alive, timeout = timeout)
-
-    return sorted(pids)
-
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-BIN_DIR = os.path.join(BASE_DIR, "bin")
-
-port_kill = kill_port(server_set["golang_port"])
-print("Golang port killed : " + str(port_kill))
-
-exe_name = linux_exe_chmod()
-exe_path = os.path.join(BIN_DIR, exe_name)
-
-cmd = [exe_path, server_set["golang_port"], run_mode, 'api']
-golang_process = subprocess.Popen(cmd, cwd = BIN_DIR)
+golang_process = subprocess.Popen(cmd)
 
 try:
     loop = asyncio.get_running_loop()
@@ -460,42 +421,23 @@ async def do_every_day():
             if await acl_check('', 'all_admin_auth', '', for_a[0]) == 1:
                 curs.execute(db_change("update user_set set data = '☑️' where name = 'user_title' and data = '✅' and id = ?"), [for_a[0]])
 
-async def daily_loop():
-    while True:
-        await do_every_day()
-        await asyncio.sleep(60 * 60 * 24)
-
-def _run_bg_loop_forever():
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    loop.create_task(daily_loop())
-    loop.run_forever()
-
-_daily_task = None
-_daily_thread = None
-
-def start_daily_scheduler():
-    global _daily_task, _daily_thread
-
-    try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        if _daily_thread is None or not _daily_thread.is_alive():
-            _daily_thread = threading.Thread(target = _run_bg_loop_forever, daemon = True)
-            _daily_thread.start()
-    else:
-        if _daily_task is None or _daily_task.done():
-            _daily_task = loop.create_task(daily_loop())
+        threading.Timer(60 * 60 * 24, do_every_day).start()
 
 def auto_do_something(data_db_set):
     if data_db_set['type'] == 'sqlite':
         back_up(data_db_set)
 
-    start_daily_scheduler()
+    try:
+        loop = asyncio.get_running_loop()
+        loop.create_task(do_every_day())
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(do_every_day())
 
 auto_do_something(data_db_set)
 
-print('Now running... http://127.0.0.1:' + server_set['port'])
+print('Now running... http://localhost:' + server_set['port'])
 
 @app.before_request
 def before_request_func():
@@ -514,30 +456,15 @@ def before_request_func():
                             history.go(0);
                         }
                     </script>
-                    <h2>''' + load_lang('error_password_require_for_wiki_access') + '''</h2>
-                    <input class="__ON_INPUT__" type="password" id="wiki_access">
-                    <input class="__ON_INPUT__" type="submit" onclick="opennamu_do_wiki_access();">
+                    <h2>''' + get_lang(conn, 'error_password_require_for_wiki_access') + '''</h2>
+                    <input type="password" id="wiki_access">
+                    <input type="submit" onclick="opennamu_do_wiki_access();">
                 '''
 
 # Init-custom
 if os.path.exists('custom.py'):
     from custom import custom_run
     custom_run('error', app)
-
-# Route_Go_Func
-
-import itertools
-
-_golang_view_seq = itertools.count()
-
-def golang_view():
-    idx = next(_golang_view_seq)
-
-    async def _view(*args, **kwargs):
-        return await python_to_golang("same")
-    
-    _view.__name__ = f"_golang_view_{idx}"
-    return _view
 
 # Func
 # Func-inter_wiki
@@ -592,11 +519,11 @@ app.route('/filter/extension_filter/add', methods = ['POST', 'GET'], defaults = 
 app.route('/filter/extension_filter/del/<everything:name>', defaults = { 'tool' : 'extension_filter' })(filter_all_delete)
 
 # Func-list
-app.route('/list/document/old')(golang_view())
-app.route('/list/document/old/<int:num>')(golang_view())
+app.route('/list/document/old', defaults = { 'set_type' : 'old' })(list_old_page)
+app.route('/list/document/old/<int:num>', defaults = { 'set_type' : 'old' })(list_old_page)
 
-app.route('/list/document/new')(golang_view())
-app.route('/list/document/new/<int:num>')(golang_view())
+app.route('/list/document/new', defaults = { 'set_type' : 'new' })(list_old_page)
+app.route('/list/document/new/<int:num>', defaults = { 'set_type' : 'new' })(list_old_page)
 
 app.route('/list/document/no_link')(list_no_link)
 app.route('/list/document/no_link/<int:num>')(list_no_link)
@@ -610,11 +537,11 @@ app.route('/list/document/need/<int:arg_num>')(list_please)
 app.route('/list/document/all')(list_title_index)
 app.route('/list/document/all/<int:num>')(list_title_index)
 
-app.route('/list/document/long')(golang_view())
-app.route('/list/document/long/<int:arg_num>')(golang_view())
+app.route('/list/document/long')(list_long_page)
+app.route('/list/document/long/<int:arg_num>')(list_long_page)
 
-app.route('/list/document/short')(golang_view())
-app.route('/list/document/short/<int:arg_num>')(golang_view())
+app.route('/list/document/short', defaults = { 'tool' : 'short_page' })(list_long_page)
+app.route('/list/document/short/<int:arg_num>', defaults = { 'tool' : 'short_page' })(list_long_page)
 
 app.route('/list/file')(list_image_file)
 app.route('/list/file/<int:arg_num>')(list_image_file)
@@ -659,29 +586,29 @@ app.route('/auth/give/fix/<user_name>', methods = ['POST', 'GET'])(give_user_fix
 app.route('/app_submit', methods = ['POST', 'GET'])(recent_app_submit)
 
 # /auth/history
-app.route('/recent_block')(golang_view())
-app.route('/recent_block/all')(golang_view())
-app.route('/recent_block/all/<int:num>')(golang_view())
-app.route('/recent_block/all/<int:num>/<everything:why>')(golang_view())
-app.route('/recent_block/user/<user_name>')(golang_view())
-app.route('/recent_block/user/<user_name>/<int:num>')(golang_view())
-app.route('/recent_block/admin/<user_name>')(golang_view())
-app.route('/recent_block/admin/<user_name>/<int:num>')(golang_view())
-app.route('/recent_block/regex')(golang_view())
-app.route('/recent_block/regex/<int:num>')(golang_view())
-app.route('/recent_block/cidr')(golang_view())
-app.route('/recent_block/cidr/<int:num>')(golang_view())
-app.route('/recent_block/private')(golang_view())
-app.route('/recent_block/private/<int:num>')(golang_view())
-app.route('/recent_block/ongoing')(golang_view())
-app.route('/recent_block/ongoing/<int:num>')(golang_view())
+app.route('/recent_block')(list_recent_block)
+app.route('/recent_block/all')(list_recent_block)
+app.route('/recent_block/all/<int:num>')(list_recent_block)
+app.route('/recent_block/all/<int:num>/<everything:why>')(list_recent_block)
+app.route('/recent_block/user/<user_name>', defaults = { 'tool' : 'user' })(list_recent_block)
+app.route('/recent_block/user/<user_name>/<int:num>', defaults = { 'tool' : 'user' })(list_recent_block)
+app.route('/recent_block/admin/<user_name>', defaults = { 'tool' : 'admin' })(list_recent_block)
+app.route('/recent_block/admin/<user_name>/<int:num>', defaults = { 'tool' : 'admin' })(list_recent_block)
+app.route('/recent_block/regex', defaults = { 'tool' : 'regex' })(list_recent_block)
+app.route('/recent_block/regex/<int:num>', defaults = { 'tool' : 'regex' })(list_recent_block)
+app.route('/recent_block/cidr', defaults = { 'tool' : 'cidr' })(list_recent_block)
+app.route('/recent_block/cidr/<int:num>', defaults = { 'tool' : 'cidr' })(list_recent_block)
+app.route('/recent_block/private', defaults = { 'tool' : 'private' })(list_recent_block)
+app.route('/recent_block/private/<int:num>', defaults = { 'tool' : 'private' })(list_recent_block)
+app.route('/recent_block/ongoing', defaults = { 'tool' : 'ongoing' })(list_recent_block)
+app.route('/recent_block/ongoing/<int:num>', defaults = { 'tool' : 'ongoing' })(list_recent_block)
 
-app.route('/recent_change')(golang_view())
-app.route('/recent_changes')(golang_view())
-app.route('/recent_change/<int:num>/<set_type>')(golang_view())
+app.route('/recent_change', defaults = { 'tool' : 'recent_change' })(list_history)
+app.route('/recent_changes', defaults = { 'tool' : 'recent_change' })(list_history)
+app.route('/recent_change/<int:num>/<set_type>', defaults = { 'tool' : 'recent_change' })(list_history)
 
-app.route('/recent_discuss')(golang_view())
-app.route('/recent_discuss/<int:num>/<tool>')(golang_view())
+app.route('/recent_discuss', defaults = { 'tool' : 'normal' })(list_recent_discuss)
+app.route('/recent_discuss/<int:num>/<tool>')(list_recent_discuss)
 
 # Func-history
 app.route('/recent_edit_request')(recent_edit_request)
@@ -695,8 +622,8 @@ app.route('/record/topic/<name>')(recent_record_topic)
 app.route('/record/bbs/<name>', defaults = { 'tool' : 'record' })(bbs_w)
 app.route('/record/bbs_comment/<name>', defaults = { 'tool' : 'comment_record' })(bbs_w)
 
-app.route('/history/<everything:doc_name>', methods = ['POST', 'GET'])(golang_view())
-app.route('/history_page/<int:num>/<set_type>/<everything:doc_name>', methods = ['POST', 'GET'])(golang_view())
+app.route('/history/<everything:doc_name>', methods = ['POST', 'GET'])(list_history)
+app.route('/history_page/<int:num>/<set_type>/<everything:doc_name>', methods = ['POST', 'GET'])(list_history)
 
 app.route('/history_tool/<int(signed = True):rev>/<everything:name>')(recent_history_tool)
 app.route('/history_delete/<int(signed = True):rev>/<everything:name>', methods = ['POST', 'GET'])(recent_history_delete)
@@ -711,31 +638,29 @@ app.route('/xref_page/<int:num>/<everything:name>')(view_xref)
 app.route('/xref_this/<everything:name>', defaults = { 'xref_type' : 2 })(view_xref)
 app.route('/xref_this_page/<int:num>/<everything:name>', defaults = { 'xref_type' : 2 })(view_xref)
 
-app.route('/doc_watch_list/<int:num>/<everything:name>')(golang_view())
-app.route('/doc_star_doc/<int:num>/<everything:name>')(golang_view())
+app.route('/doc_watch_list/<int:num>/<everything:name>')(w_watch_list)
+app.route('/doc_star_doc/<int:num>/<everything:name>', defaults = { 'do_type' : 'star_doc' })(w_watch_list)
 
-app.route('/raw/<everything:name>')(golang_view())
-app.route('/raw_acl/<everything:name>')(golang_view())
-app.route('/raw_rev/<int(signed = True):rev>/<everything:name>')(golang_view())
+app.route('/raw/<everything:name>')(view_w_raw)
+app.route('/raw_acl/<everything:name>', defaults = { 'doc_acl' : 'on' })(view_w_raw)
+app.route('/raw_rev/<int(signed = True):rev>/<everything:name>')(view_w_raw)
 
 app.route('/diff/<int(signed = True):num_a>/<int(signed = True):num_b>/<everything:name>')(view_diff)
 
-app.route('/down/<everything:name>')(golang_view())
+app.route('/down/<everything:name>')(view_down)
 
 app.route('/acl_multiple', defaults = { 'multiple' : True }, methods = ['POST', 'GET'])(view_set)
 app.route('/acl/<everything:name>', methods = ['POST', 'GET'])(view_set)
 
-app.route('/render/<int:doc_rev>/<everything:name>')(view_w)
-
 app.route('/w_from/<everything:name>', defaults = { 'do_type' : 'from' })(view_w)
 app.route('/w/<everything:name>')(view_w)
 
-app.route('/random')(golang_view())
-app.route('/list/random')(golang_view())
+app.route('/random')(view_random)
 
 # Func-edit
-app.route('/edit/<everything:name>', methods = ['POST', 'GET'])(golang_view())
-app.route('/edit_from/<everything:name>', methods = ['POST', 'GET'])(golang_view())
+app.route('/edit/<everything:name>', methods = ['POST', 'GET'])(edit)
+app.route('/edit_from/<everything:name>', methods = ['POST', 'GET'], defaults = { 'do_type' : 'load' })(edit)
+app.route('/edit_section/<int:section>/<everything:name>', methods = ['POST', 'GET'])(edit)
 
 app.route('/edit_request/<everything:name>', methods = ['POST', 'GET'])(edit_request)
 app.route('/edit_request_from/<everything:name>', defaults = { 'do_type' : 'from' }, methods = ['POST', 'GET'])(edit_request)
@@ -757,10 +682,8 @@ app.route('/move/<everything:name>', methods = ['POST', 'GET'])(edit_move)
 app.route('/move_all')(edit_move_all)
 
 # Func-topic
-app.route('/topic/<everything:name>')(golang_view())
-app.route('/topic_page/<int:page>/<everything:name>')(golang_view())
-app.route('/topic_close/<int:page>/<everything:name>')(golang_view())
-app.route('/topic_agree/<int:page>/<everything:name>')(golang_view())
+app.route('/topic/<everything:name>', methods = ['POST', 'GET'])(topic_list)
+app.route('/topic_page/<int:page>/<everything:name>', methods = ['POST', 'GET'])(topic_list)
 
 app.route('/thread/<int:topic_num>', methods = ['POST', 'GET'])(topic)
 app.route('/thread/0/<everything:doc_name>', defaults = { 'topic_num' : '0' }, methods = ['POST', 'GET'])(topic)
@@ -794,8 +717,8 @@ app.route('/skin_set')(user_setting_skin_set)
 # 하위 호환용 E
 app.route('/change/skin_set/main', methods = ['POST', 'GET'])(user_setting_skin_set_main)
 
-app.route('/user')(golang_view())
-app.route('/user/<name>')(golang_view())
+app.route('/user')(user_info)
+app.route('/user/<name>')(user_info)
 
 app.route('/challenge', methods = ['GET', 'POST'])(user_challenge)
 
@@ -808,13 +731,13 @@ app.route('/alarm')(user_alarm)
 app.route('/alarm/delete')(user_alarm_delete)
 app.route('/alarm/delete/<int:id>')(user_alarm_delete)
 
-app.route('/watch_list')(golang_view())
-app.route('/watch_list/<everything:name>', methods = ['POST', 'GET'])(golang_view())
-app.route('/watch_list_from/<everything:name>', methods = ['POST', 'GET'])(golang_view())
+app.route('/watch_list', defaults = { 'tool' : 'watch_list' })(user_watch_list)
+app.route('/watch_list/<everything:name>', defaults = { 'tool' : 'watch_list' })(user_watch_list_name)
+app.route('/watch_list_from/<everything:name>', defaults = { 'tool' : 'watch_list_from' })(user_watch_list_name)
 
-app.route('/star_doc')(golang_view())
-app.route('/star_doc/<everything:name>', methods = ['POST', 'GET'])(golang_view())
-app.route('/star_doc_from/<everything:name>', methods = ['POST', 'GET'])(golang_view())
+app.route('/star_doc', defaults = { 'tool' : 'star_doc' })(user_watch_list)
+app.route('/star_doc/<everything:name>', defaults = { 'tool' : 'star_doc' })(user_watch_list_name)
+app.route('/star_doc_from/<everything:name>', defaults = { 'tool' : 'star_doc_from' })(user_watch_list_name)
 
 # 개편 보류중 S
 app.route('/change/email', methods = ['POST', 'GET'])(user_setting_email)
@@ -854,16 +777,15 @@ app.route('/vote/list/close/<int:num>', defaults = { 'list_type' : 'close' })(vo
 app.route('/vote/add', methods = ['POST', 'GET'])(vote_add)
 
 # Func-bbs
-app.route('/bbs/main')(golang_view())
+app.route('/bbs/main')(bbs_main)
 app.route('/bbs/make', methods = ['POST', 'GET'])(bbs_make)
-app.route('/bbs/in/<int:bbs_num>')(golang_view())
-app.route('/bbs/in/<int:bbs_num>/<int:page>')(golang_view())
+app.route('/bbs/in/<int:bbs_num>')(bbs_in)
+app.route('/bbs/in/<int:bbs_num>/<int:page>')(bbs_in)
 # app.route('/bbs/blind/<int:bbs_num>', methods = ['POST', 'GET'])(bbs_hide)
 app.route('/bbs/delete/<int:bbs_num>', methods = ['POST', 'GET'])(bbs_delete)
 app.route('/bbs/set/<int:bbs_num>', methods = ['POST', 'GET'])(bbs_w_set)
 app.route('/bbs/edit/<int:bbs_num>', methods = ['POST', 'GET'])(bbs_w_edit)
-app.route('/bbs/w/<int:bbs_num>/<int:post_num>', methods = ['POST'])(bbs_w_post)
-app.route('/bbs/w/<int:bbs_num>/<int:post_num>', methods = ['GET'])(golang_view())
+app.route('/bbs/w/<int:bbs_num>/<int:post_num>', methods = ['POST', 'GET'])(bbs_w_post)
 # app.route('/bbs/blind/<int:bbs_num>/<int:post_num>', methods = ['POST', 'GET'])(bbs_w_hide)
 app.route('/bbs/pinned/<int:bbs_num>/<int:post_num>', methods = ['POST', 'GET'])(bbs_w_pinned)
 app.route('/bbs/delete/<int:bbs_num>/<int:post_num>', methods = ['POST', 'GET'])(bbs_w_delete)
@@ -884,10 +806,10 @@ app.route('/api/raw_exist/<everything:name>', defaults = { 'exist_check' : 'on' 
 app.route('/api/raw_rev/<int(signed = True):rev>/<everything:name>')(api_w_raw)
 app.route('/api/raw/<everything:name>')(api_w_raw)
 
-app.route('/api/xref/<int:page>/<everything:name>')(golang_view())
-app.route('/api/xref_this/<int:page>/<everything:name>')(golang_view())
+app.route('/api/xref/<int:page>/<everything:name>')(api_w_xref)
+app.route('/api/xref_this/<int:page>/<everything:name>', defaults = { 'xref_type' : '2' })(api_w_xref)
 
-app.route('/api/random')(golang_view())
+app.route('/api/random')(api_w_random)
 
 app.route('/api/bbs/w/<sub_code>')(api_bbs_w)
 app.route('/api/bbs/w/comment/<sub_code>')(api_bbs_w_comment_exter)
@@ -896,108 +818,96 @@ app.route('/api/bbs/w/comment_one/<sub_code>')(api_bbs_w_comment_one_exter)
 app.route('/api/version', defaults = { 'version_list' : version_list })(api_version)
 app.route('/api/skin_info')(api_skin_info)
 app.route('/api/skin_info/<name>')(api_skin_info)
-app.route('/api/user_info/<user_name>')(golang_view())
+app.route('/api/user_info/<user_name>')(api_user_info)
 
 app.route('/api/thread/<int:topic_num>/<int:s_num>/<int:e_num>')(api_topic)
 app.route('/api/thread/<int:topic_num>/<tool>')(api_topic)
 app.route('/api/thread/<int:topic_num>')(api_topic)
 
-app.route('/api/search/<everything:name>')(golang_view())
-app.route('/api/search_page/<int:num>/<everything:name>')(golang_view())
-app.route('/api/search_data/<everything:name>', defaults = { 'search_type' : 'data' })(golang_view())
-app.route('/api/search_data_page/<int:num>/<everything:name>', defaults = { 'search_type' : 'data' })(golang_view())
+app.route('/api/search/<everything:name>')(api_func_search_exter)
+app.route('/api/search_page/<int:num>/<everything:name>')(api_func_search_exter)
+app.route('/api/search_data/<everything:name>', defaults = { 'search_type' : 'data' })(api_func_search_exter)
+app.route('/api/search_data_page/<int:num>/<everything:name>', defaults = { 'search_type' : 'data' })(api_func_search_exter)
 
-app.route('/api/recent_change')(golang_view())
-app.route('/api/recent_changes')(golang_view())
-app.route('/api/recent_change/<int:limit>')(golang_view())
-app.route('/api/recent_change/<int:limit>/<set_type>/<int:num>')(golang_view())
+app.route('/api/recent_change')(api_list_recent_change_exter)
+app.route('/api/recent_changes')(api_list_recent_change_exter)
+app.route('/api/recent_change/<int:limit>')(api_list_recent_change_exter)
+app.route('/api/recent_change/<int:limit>/<set_type>/<int:num>')(api_list_recent_change_exter)
 
 app.route('/api/recent_edit_request')(api_list_recent_edit_request_exter)
 app.route('/api/recent_edit_request/<int:limit>/<set_type>/<int:num>')(api_list_recent_edit_request_exter)
 
-app.route('/api/recent_discuss/<set_type>/<int:limit>')(golang_view())
-app.route('/api/recent_discuss/<int:limit>')(golang_view())
-app.route('/api/recent_discuss')(golang_view())
+app.route('/api/recent_discuss/<set_type>/<int:limit>')(api_list_recent_discuss)
+app.route('/api/recent_discuss/<int:limit>')(api_list_recent_discuss)
+app.route('/api/recent_discuss')(api_list_recent_discuss)
 
-app.route('/api/lang', methods = ['POST'])(api_func_language_exter)
-app.route('/api/lang/<data>')(api_func_language_exter)
-app.route('/api/sha224/<everything:data>')(golang_view())
+app.route('/api/lang', methods = ['POST'])(api_func_language)
+app.route('/api/lang/<data>')(api_func_language)
+app.route('/api/sha224/<everything:data>')(api_func_sha224)
 app.route('/api/ip/<everything:data>')(api_func_ip)
 
 app.route('/api/image/<everything:name>')(api_image_view)
 
 ## v2 API
 app.route('/api/v2/recent_edit_request/<set_type>/<int:num>', defaults = { 'limit' : 50 })(api_list_recent_edit_request)
-app.route('/api/v2/recent_change/<set_type>/<int:num>')(golang_view())
-app.route('/api/v2/recent_discuss/<set_type>/<int:num>')(golang_view())
-app.route('/api/v2/recent_block/<set_type>/<int:num>')(golang_view())
-app.route('/api/v2/recent_block/<set_type>/<int:num>/<everything:why>')(golang_view())
-app.route('/api/v2/recent_block_user/<set_type>/<int:num>/<user_name>')(golang_view())
-app.route('/api/v2/recent_block_user/<set_type>/<int:num>/<user_name>/<everything:why>')(golang_view())
-app.route('/api/v2/list/document/old/<int:num>')(golang_view())
-app.route('/api/v2/list/document/new/<int:num>')(golang_view())
-app.route('/api/v2/list/document/<int:num>')(golang_view())
-app.route('/api/v2/list/auth')(golang_view())
-app.route('/api/v2/list/markup')(golang_view())
+app.route('/api/v2/recent_change/<set_type>/<int:num>', defaults = { 'legacy' : '', 'limit' : 50 })(api_list_recent_change_exter)
+app.route('/api/v2/recent_discuss/<set_type>/<int:num>', defaults = { 'legacy' : '', 'limit' : 50 })(api_list_recent_discuss)
+app.route('/api/v2/recent_block/<set_type>/<int:num>')(api_list_recent_block)
+app.route('/api/v2/recent_block/<set_type>/<int:num>/<everything:why>')(api_list_recent_block)
+app.route('/api/v2/recent_block_user/<set_type>/<int:num>/<user_name>')(api_list_recent_block)
+app.route('/api/v2/recent_block_user/<set_type>/<int:num>/<user_name>/<everything:why>')(api_list_recent_block)
+app.route('/api/v2/list/document/old/<int:num>', defaults = { 'set_type' : 'old' })(api_list_old_page_exter)
+app.route('/api/v2/list/document/new/<int:num>', defaults = { 'set_type' : 'new' })(api_list_old_page_exter)
+app.route('/api/v2/list/document/<int:num>')(api_list_title_index)
+app.route('/api/v2/list/auth')(api_list_auth)
+app.route('/api/v2/list/markup')(api_list_markup)
 app.route('/api/v2/list/acl/<data_type>')(api_list_acl)
-app.route('/api/v2/history/<int:num>/<set_type>/<everything:doc_name>')(golang_view())
+app.route('/api/v2/history/<int:num>/<set_type>/<everything:doc_name>')(api_list_history_exter)
 
-app.route('/api/v2/topic/<int:num>/<set_type>/<everything:name>')(golang_view())
+app.route('/api/v2/topic/<int:num>/<set_type>/<everything:name>')(api_topic_list)
 
-app.route('/api/v2/bbs')(golang_view())
-app.route('/api/v2/bbs/main')(golang_view())
+app.route('/api/v2/bbs')(api_bbs_list)
+app.route('/api/v2/bbs/main')(api_bbs)
 app.route('/api/v2/bbs/set/<int:bbs_num>/<name>', methods = ['GET', 'PUT'])(api_bbs_w_set)
-app.route('/api/v2/bbs/in/<int:bbs_num>/<int:page>')(golang_view())
-
+app.route('/api/v2/bbs/in/<int:bbs_num>/<int:page>')(api_bbs)
 app.route('/api/v2/bbs/w/<sub_code>', defaults = { 'legacy' : '' })(api_bbs_w)
-app.route('/api/v2/bbs/w/tabom/<sub_code>', methods = ['GET', 'POST'])(golang_view())
+app.route('/api/v2/bbs/w/tabom/<sub_code>', methods = ['GET', 'POST'])(api_bbs_w_tabom)
 app.route('/api/v2/bbs/w/comment/<sub_code>/<tool>', defaults = { 'legacy' : '' })(api_bbs_w_comment_exter)
 app.route('/api/v2/bbs/w/comment_one/<sub_code>/<tool>', defaults = { 'legacy' : '' })(api_bbs_w_comment_one_exter)
 
-app.route('/api/v2/bbs/w/page_view/<set_id>/<set_code>')(golang_view())
-app.route('/api/v2/bbs/w/page_view_post/<set_id>/<set_code>')(golang_view())
+app.route('/api/v2/doc_star_doc/<int:num>/<everything:name>', defaults = { 'do_type' : 'star_doc' })(api_w_watch_list)
+app.route('/api/v2/doc_watch_list/<int:num>/<everything:name>')(api_w_watch_list)
+app.route('/api/v2/set_reset/<everything:name>')(api_w_set_reset)
+app.route('/api/v2/page_view/<everything:name>')(api_w_page_view)
 
-app.route('/api/v2/doc_star_doc/<int:num>/<everything:name>', defaults = { 'do_type' : 'star_doc' })(golang_view())
-app.route('/api/v2/doc_watch_list/<int:num>/<everything:name>')(golang_view())
-app.route('/api/v2/set_reset/<everything:name>')(golang_view())
+app.route('/api/v2/setting/<name>', methods = ['GET', 'PUT'])(api_setting)
 
-app.route('/api/v2/page_view/<everything:name>')(golang_view())
-app.route('/api/v2/page_view_post/<everything:name>')(golang_view())
+app.route('/api/v2/auth')(api_func_auth)
+app.route('/api/v2/auth/<user_name>')(api_func_auth)
+app.route('/api/v2/auth/give', methods = ['PATCH'])(api_give_auth)
 
-app.route('/api/v2/setting/<name>', methods = ['GET', 'PUT'])(api_setting_exter)
-
-app.route('/api/v2/auth')(api_func_auth_exter)
-app.route('/api/v2/auth/<user_name>')(api_func_auth_exter)
-app.route('/api/v2/auth/give', methods = ['PATCH'])(golang_view())
-
-app.route('/api/v2/user/rankup', methods = ['GET', 'PATCH'])(golang_view())
-app.route('/api/v2/user/setting/editor', methods = ['GET', 'POST', 'DELETE'])(golang_view())
+app.route('/api/v2/user/rankup', methods = ['GET', 'PATCH'])(api_user_rankup)
+app.route('/api/v2/user/setting/editor', methods = ['GET', 'POST', 'DELETE'])(api_user_setting_editor)
 
 app.route('/api/v2/ip/<everything:data>', methods = ['GET', 'POST'])(api_func_ip)
 app.route('/api/v2/ip_menu/<everything:ip>', defaults = { 'option' : 'user' }, methods = ['GET', 'POST'])(api_func_ip_menu)
 app.route('/api/v2/user_menu/<everything:ip>')(api_func_ip_menu)
-app.route('/api/v2/lang', defaults = { 'legacy' : '' }, methods = ['POST'])(api_func_language_exter)
+app.route('/api/v2/lang', defaults = { 'legacy' : '' }, methods = ['POST'])(api_func_language)
 
 # Func-main
 # 여기도 전반적인 조정 시행 예정
-app.route('/other')(golang_view())
+app.route('/other')(main_tool_other)
 app.route('/manager', methods = ['POST', 'GET'])(main_tool_admin)
 app.route('/manager/<int:num>', methods = ['POST', 'GET'])(main_tool_redirect)
 app.route('/manager/<int:num>/<everything:add_2>', methods = ['POST', 'GET'])(main_tool_redirect)
 
-app.route('/search/<everything:name>', methods = ['GET'])(golang_view())
-app.route('/goto/<everything:name>', methods = ['GET'])(golang_view())
-app.route('/search_page/<int:num>/<everything:name>', methods = ['GET'])(golang_view())
-app.route('/search_data/<everything:name>', methods = ['GET'])(golang_view())
-app.route('/search_data_page/<int:num>/<everything:name>', methods = ['GET'])(golang_view())
-
-app.route('/goto', methods = ['POST'])(golang_view())
-app.route('/goto/<everything:name>', methods = ['POST'])(golang_view())
-app.route('/search', methods = ['POST'])(golang_view())
-app.route('/search/<everything:name>', methods = ['POST'])(golang_view())
-app.route('/search_page/<int:num>/<everything:name>', methods = ['POST'])(golang_view())
-app.route('/search_data/<everything:name>', methods = ['POST'])(golang_view())
-app.route('/search_data_page/<int:num>/<everything:name>', methods = ['POST'])(golang_view())
+app.route('/search', methods=['POST'])(main_search)
+app.route('/search/<everything:name>', methods = ['POST', 'GET'])(main_search_deep)
+app.route('/search_page/<int:num>/<everything:name>', methods = ['POST', 'GET'])(main_search_deep)
+app.route('/search_data/<everything:name>', defaults = { 'search_type' : 'data' }, methods = ['POST', 'GET'])(main_search_deep)
+app.route('/search_data_page/<int:num>/<everything:name>', defaults = { 'search_type' : 'data' }, methods = ['POST', 'GET'])(main_search_deep)
+app.route('/goto', methods=['POST'])(main_search_goto)
+app.route('/goto/<everything:name>', methods=['GET', 'POST'])(main_search_goto)
 
 app.route('/setting')(main_setting)
 app.route('/setting/main', methods = ['POST', 'GET'])(main_setting_main)
@@ -1015,8 +925,10 @@ app.route('/setting/external', methods = ['POST', 'GET'])(main_setting_external)
 app.route('/setting/sitemap', methods = ['POST', 'GET'])(main_setting_sitemap)
 app.route('/setting/sitemap_set', methods = ['POST', 'GET'])(main_setting_sitemap_set)
 app.route('/setting/skin_set', methods = ['POST', 'GET'])(main_setting_skin_set)
-app.route('/setting/404_page', methods = ['POST', 'GET'])(main_setting_404_page)
+app.route('/setting/404_page', methods = ['POST', 'GET'])(setting_404_page)
 app.route('/setting/email_test', methods = ['POST', 'GET'])(main_setting_email_test)
+
+app.route('/easter_egg')(main_func_easter_egg)
 
 # views -> view
 app.route('/view/<path:name>')(main_view)
@@ -1029,7 +941,7 @@ app.route('/shutdown', methods = ['POST', 'GET'])(main_sys_shutdown)
 app.route('/restart', defaults = { 'golang_process' : golang_process }, methods = ['POST', 'GET'])(main_sys_restart)
 app.route('/update', defaults = { 'golang_process' : golang_process }, methods = ['POST', 'GET'])(main_sys_update)
 
-app.errorhandler(404)(golang_view())
+app.errorhandler(404)(main_func_error_404)
 
 def terminate_golang():
     if golang_process.poll() is None:
@@ -1044,8 +956,6 @@ def terminate_golang():
                 print('Golang process not terminated properly.')
 
 def signal_handler(signal, frame):
-    print("EXIT SIGNAL RECEIVED")
-    
     terminate_golang()
     os._exit(0)
 
@@ -1058,32 +968,9 @@ app.wsgi_app = ProxyFix(app.wsgi_app, x_for = 1, x_proto = 1)
 
 if __name__ == "__main__":
     if run_mode in ['dev']:
-        app.config['TEMPLATES_AUTO_RELOAD'] = True
-        app.config['SEND_FILE_MAX_AGE_DEFAULT'] = 0
-
-        app.jinja_options["cache_size"] = 0
-        app.jinja_options["auto_reload"] = True
-        app.jinja_options["bytecode_cache"] = None
-
-        app.jinja_env.filters['md5_replace'] = md5_replace
-        app.jinja_env.filters['load_lang'] = load_lang
-        app.jinja_env.filters['cut_100'] = cut_100
-
-        app.run(
-            host = server_set['host'],
-            port = int(server_set['port']),
-            use_reloader = False,
-            threaded = False,
-            debug = True,
-        )
+        app.run(host = server_set['host'], port = int(server_set['port']), use_reloader = False)
     else:
-        app.jinja_env.filters['md5_replace'] = md5_replace
-        app.jinja_env.filters['load_lang'] = load_lang
-        app.jinja_env.filters['cut_100'] = cut_100
+        config = Config()
+        config.bind = [server_set['host'] + ":" + server_set['port']]
 
-        serve(
-            app,
-            host = server_set['host'],
-            port = int(server_set['port']),
-            threads = 1,
-        )
+        asyncio.run(serve(app, config))

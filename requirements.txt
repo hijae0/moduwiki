@@ -1,17 +1,19 @@
 pip
 
+h11
 flask
-werkzeug
-requests
 flask[async]
-hypercorn
+waitress
 
 aiohttp
 asyncio
+nest-asyncio
 requests
 
+psutil
 diff-match-patch
 
 pillow
 
 pymysql
+cryptography

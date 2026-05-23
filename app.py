@@ -59,24 +59,26 @@ with get_db_connect(init_mode = True) as conn:
         local_file_path = os.path.join("bin", file_name)
 
         if not (setup_tool == "normal" and os.path.exists(local_file_path)):
+            # If a binary exists and we're not in normal mode, remove it
             if os.path.exists(local_file_path):
                 print('Remove Old Binary')
                 try:
                     os.remove(local_file_path)
                 except PermissionError:
                     print('Permission denied while removing old binary; skipping removal')
-
-
+            # Download the new binary
             download_url = version_list["bin_link"] + file_name
-
             print('Download New Binary File')
-            response = requests.get(download_url, stream = True)
+            response = requests.get(download_url, stream=True)
             if response.status_code == 200:
                 with open(local_file_path, 'wb') as file:
-                    for chunk in response.iter_content(chunk_size = 8192):
+                    for chunk in response.iter_content(chunk_size=8192):
                         file.write(chunk)
-
                 print('Complete Download')
+            else:
+                print('Failed to download binary, status code:', response.status_code)
+        else:
+            print('Binary already exists, using existing file')
 
     if data_db_set['type'] == 'mysql':
         try:
@@ -1087,3 +1089,7 @@ if __name__ == "__main__":
             port = int(server_set['port']),
             threads = 1,
         )
+
+    app = fast_app if 'fast_app' in globals() else None
+    if app is None and 'conn' in globals():
+        app = conn

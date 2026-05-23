@@ -60,11 +60,11 @@ with get_db_connect(init_mode = True) as conn:
 
         if not (setup_tool == "normal" and os.path.exists(local_file_path)):
             if os.path.exists(local_file_path):
-    print('Remove Old Binary')
-    try:
-        os.remove(local_file_path)
-    except PermissionError:
-        print('Permission denied while removing old binary; skipping removal')
+                print('Remove Old Binary')
+                try:
+                    os.remove(local_file_path)
+                except PermissionError:
+                    print('Permission denied while removing old binary; skipping removal')
 
 
             download_url = version_list["bin_link"] + file_name
